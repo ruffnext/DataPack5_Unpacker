@@ -1,5 +1,7 @@
 import struct
 import sys
+from PIL import Image
+import numpy as np
 
 fcodec = 'Shift_JIS'
 
@@ -89,20 +91,43 @@ class pak_file_5_header:
         print("     Footer Size : " + str(hex(self.footer_size)))
         print("   Footer Offset : " + str(hex(self.footer_offset)))
 
-from PIL import Image
-import numpy as np
+class scw_file:
+    def __init__(self, filename, data):
+        self.filename = filename
+        self.data = None
+        (magic, major_v, flag, unpacked_size, raw_size, minor_v) = struct.unpack('16sIIIII',data[0:0x24])
+        if flag == 0xFFFFFFFF:
+            self.data = bytearray()
+            for i in range(raw_size):
+                byte_selected = np.uint8(data[i+0x1C8])
+                #print(str(type(byte_selected)))
+                byte_selected = byte_selected ^ np.uint8(i)
+                self.data.append(byte_selected)
+            reader = op_reader()
+            self.data = reader.read(self.data,raw_size)
+        else:
+            print("Warning : [" + filename + '] is not supported SCW file')
+    def save_to_dir(self,directory):
+        if not self.data:
+            return False
+        f = open(directory + self.filename + '.scw5','wb')
+        f.write(self.data)
+        f.close()
+        return True
 
 class image_file:
     def __init__(self, filename, data):
         self.filename = filename
         self.data = None
         self.byte_num = 0
-        (filetype, raw_size, _, self.resolution_x, self.resolution_y, img_type, _) = struct.unpack('II12sIII8s',data[0:0x28])
+        (filetype, raw_size, unpacked_size, unk2,unk3, self.resolution_x, self.resolution_y, img_type, self.use_alpha,unk) = struct.unpack('IIIIIIIIII',data[0:0x28])
+        # unk2 eq 0x74
+        print(str(hex(unk3))+' \t',end='')
         if filetype != 0x40000:
             print("Warning : [" + filename + "] type [" + str(hex(filetype)) + "] is not a valid image file")
             return
         if img_type == 8:
-            print("Warning : [" + filename + '] is not supported!')
+            self.byte_num = 1
         elif img_type == 0x18:
             self.byte_num = 3
         elif img_type == 0x20:
@@ -119,28 +144,35 @@ class image_file:
     def save_to_dir(self, directory):
         if self.data == None:
             return 0
+        if self.byte_num == 1:
+            print(str(self.resolution_x) + "x" + str(self.resolution_y))
+            f = open(directory + self.filename,'wb')
+            f.write(self.data)
+            f.close()
+            return 1
         img = [[None for x in range(self.resolution_x)] for y in range(self.resolution_y)]
         for y in range(self.resolution_y):
             for x in range(self.resolution_x):
                 index = (y*self.resolution_x + x)*self.byte_num
-                r = np.uint8(self.data[index])
+                b = np.uint8(self.data[index])
                 g = np.uint8(self.data[index+1])
-                b = np.uint8(self.data[index+2])
-                if self.byte_num == 4:
-                    # alpha channel has been disabled
-                    img[y][x] = [b,g,r]
-
-                    # to enable alpha channel, just uncomment the following code
-                    #a = np.uint8(self.data[index+3])
-                    #img[y][x] = [b,g,r,a]
+                r = np.uint8(self.data[index+2])
+                if self.byte_num == 4 and self.use_alpha == 0xf:
+                    # use alpha channel
+                    a = np.uint8(self.data[index+3])
+                    img[y][x] = [r,g,b,a]
+                elif self.byte_num == 4 or self.use_alpha != 0xf:
+                    # skip alpha channel
+                    img[y][x] = [r,g,b]
                 else:
-                    img[y][x] = [b,g,r]
+                    print("img file not supported")
+                    return 0 
         arr = np.array(img,dtype=np.uint8)
         c_img = Image.fromarray(arr)
         c_img.save(directory + self.filename + '.png')
         return 1
         
-
+# common file meta contained in DataPack5
 class pak_file_5_meta:
     meta_size = 0x68
     def __init__(self, data,f_type = None):
@@ -151,12 +183,15 @@ class pak_file_5_meta:
     def set_type(self, f_type):
         if f_type == 0x40000:
             self.type = "IMG"
+        elif f_type == 0x35776353:
+            self.type = "SCW"
         else:
-            self.type = None
+            self.type = str(hex(f_type))
     def print_info(self):
         print('%-32s%-20s%-16s%-20s'%(
             '[%s]'%self.filename,
-            'size = %.2f KB'%(self.file_size/1024),
+            #'size = %.2f KB'%(self.file_size/1024),
+            'size = ' + hex(self.file_size),
             'type = '+ str(self.type),
             'offset = 0x%08X'%self.offset
         ))
@@ -217,7 +252,7 @@ import os
 
 if __name__ == "__main__":
     if len(sys.argv) == 1:
-        filename = "../../Graphic06.pak"
+        filename = "../../Scr06.pak"
     else:
         filename = sys.argv[1]
     unpack_file = None
@@ -230,16 +265,29 @@ if __name__ == "__main__":
     if not os.path.isdir(pak_name):
         os.mkdir(pak_name)
     for i in pak.file_metas:
+        save_to_file_status = True
+        do_save_to_file = True
         if unpack_file != None and i.filename != unpack_file:
             continue
         if i.type == "IMG": # image item
-            offset = pak.header.raw_offset+i.offset
-            pak.fp.seek(offset,0)
-            img = image_file(i.filename,pak.fp.read(i.file_size))
-            if img.save_to_dir(pak_name + '/'):
+            img = image_file(i.filename,pak.get_file_data(i))
+            if do_save_to_file:
+                save_to_file_status = img.save_to_dir(pak_name + '/')
+        elif i.type == "SCW":   # script item
+            scw = scw_file(i.filename, pak.get_file_data(i))
+            if do_save_to_file:
+                save_to_file_status = scw.save_to_dir(pak_name + '/')
+        else:
+            if do_save_to_file:
+                f = open(pak_name + '/' + i.filename,'wb')
+                f.write(pak.get_file_data(i))
+                f.close()
+                save_to_file_status = True
+        if not do_save_to_file:
+            print("[skip]"+'\t',end='')
+        else:
+            if save_to_file_status:
                 print("[done]"+'\t',end='')
             else:
                 print("[fail]"+'\t',end='')
-        else:
-            print("[skip]"+'\t',end='')
         i.print_info()
