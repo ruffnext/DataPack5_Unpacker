@@ -92,19 +92,25 @@ class pak_file_5_header:
         print("   Footer Offset : " + str(hex(self.footer_offset)))
 
 class scw_file:
+    type_code = 0x35776353
+    type_name = "SCW"
+    meta_size = 0x1C8
     def __init__(self, filename, data):
         self.filename = filename
         self.data = None
-        (magic, major_v, flag, unpacked_size, raw_size, minor_v) = struct.unpack('16sIIIII',data[0:0x24])
-        if flag == 0xFFFFFFFF:
+                                                                        #
+        (magic, major_v, flag, unpacked_size, raw_size, minor_v, self.show_num, self.text_num, self.unk_num, self.show_block_size, self.text_block_size, self.unk_block_size) = struct.unpack('16sIIIIIIIIII400s',data[0:self.meta_size])
+        if flag == 0xFFFFFFFF and major_v == 0x5000000 and magic.decode(fcodec).rstrip('\0') == 'Scw5.x' and minor_v == 0x1:
             self.data = bytearray()
             for i in range(raw_size):
-                byte_selected = np.uint8(data[i+0x1C8])
-                #print(str(type(byte_selected)))
+                byte_selected = np.uint8(data[i+self.meta_size])
                 byte_selected = byte_selected ^ np.uint8(i)
                 self.data.append(byte_selected)
             reader = op_reader()
             self.data = reader.read(self.data,raw_size)
+            if len(self.data) != unpacked_size:
+                print("Warning : [" + filename + '] unpacked size should be ' + str(hex(unpacked_size)) + " but " + str(hex(len(self.data)) + " unpacked!"))
+                self.data = None
         else:
             print("Warning : [" + filename + '] is not supported SCW file')
     def save_to_dir(self,directory):
@@ -113,17 +119,37 @@ class scw_file:
         f = open(directory + self.filename + '.scw5','wb')
         f.write(self.data)
         f.close()
+        if self.text_num and self.text_block_size:
+            offset = self.show_num*8
+            text_index_table = self.data[offset:offset+self.text_num*8]
+            offset += (self.text_num + self.unk_num) * 8 + self.show_block_size
+            text_block_data = self.data[offset:offset+self.text_block_size]
+            text = []
+            for i in range(self.text_num):
+                (start, length) = struct.unpack('II',text_index_table[i*8:(i+1)*8])
+                try:
+                    text.append(text_block_data[start:start+length].decode(fcodec).replace('\0','\n\n'))
+                except Exception:
+                    text.append("[FAILED TO DECODE]\n")
+                    text.append(str(text_block_data[start:start+length]) + "\n\n")
+            txt_file = open(directory + self.filename + '.txt','w',encoding='utf-8')
+            txt_file.writelines(text)
+            txt_file.close()
+
+
+
         return True
 
 class image_file:
+    type_code = 0x40000
+    type_name = "IMG"
+    meta_size = 0x74
     def __init__(self, filename, data):
         self.filename = filename
         self.data = None
         self.byte_num = 0
-        (filetype, raw_size, unpacked_size, unk2,unk3, self.resolution_x, self.resolution_y, img_type, self.use_alpha,unk) = struct.unpack('IIIIIIIIII',data[0:0x28])
-        # unk2 eq 0x74
-        print(str(hex(unk3))+' \t',end='')
-        if filetype != 0x40000:
+        (filetype, raw_size, unpacked_size, _, _, self.resolution_x, self.resolution_y, img_type, self.use_alpha,_,_) = struct.unpack('IIIIIIIIII76s',data[0:self.meta_size])
+        if filetype != self.type_code:
             print("Warning : [" + filename + "] type [" + str(hex(filetype)) + "] is not a valid image file")
             return
         if img_type == 8:
@@ -136,7 +162,10 @@ class image_file:
             print("Warning : [" + filename + "] is not a valid image file")
             return
         reader = op_reader()
-        self.data = reader.read(data[0x74:],raw_size)
+        self.data = reader.read(data[self.meta_size:],raw_size)
+        if len(self.data) != unpacked_size:
+            print("Warning : [" + filename + '] unpacked size should be ' + str(hex(unpacked_size)) + " but " + str(hex(len(self.data)) + " unpacked!"))
+            self.data = None
     
     # ignore alpha channel
     # directory must be ended with / or \\
@@ -173,18 +202,18 @@ class image_file:
         return 1
         
 # common file meta contained in DataPack5
-class pak_file_5_meta:
+class file_item:
     meta_size = 0x68
     def __init__(self, data,f_type = None):
         self.data = data
         self.type = f_type
-        (self.filename, self.offset, self.file_size, self.unknown) = struct.unpack('64sII32s',self.data)
+        (self.filename, self.offset, self.file_size, _) = struct.unpack('64sII32s',self.data)
         self.filename = self.filename.decode(fcodec).rstrip('\0')
     def set_type(self, f_type):
-        if f_type == 0x40000:
-            self.type = "IMG"
-        elif f_type == 0x35776353:
-            self.type = "SCW"
+        if f_type == image_file.type_code:
+            self.type = image_file.type_name
+        elif f_type == scw_file.type_code:
+            self.type = scw_file.type_name
         else:
             self.type = str(hex(f_type))
     def print_info(self):
@@ -212,30 +241,30 @@ class pak_file:
         # read file metas(meta version 5)
         self.fp.seek(self.header.footer_offset,0)
         meta_buf = self.reader.read(self.fp.read(self.header.footer_size),self.header.footer_size)
-        self.file_metas = []
+        self.file_items = []
         for i in range(self.header.file_num):
-            file_meta = pak_file_5_meta(meta_buf[i*pak_file_5_meta.meta_size:(i+1)*pak_file_5_meta.meta_size])
-            self.fp.seek(self.header.raw_offset + file_meta.offset)
-            file_meta.set_type(int.from_bytes(self.fp.read(4),byteorder='little'))
-            self.file_metas.append(file_meta)
+            item = file_item(meta_buf[i*file_item.meta_size:(i+1)*file_item.meta_size])
+            self.fp.seek(self.header.raw_offset + item.offset)
+            item.set_type(int.from_bytes(self.fp.read(4),byteorder='little'))
+            self.file_items.append(item)
     def print_info(self):
         print("----------PAK FILE HEADER----------")
         self.header.print_info()
     def print_file_list(self):
         print("-----------------------------PAK FILE LIST ----------------------------")
-        for i in self.file_metas:
+        for i in self.file_items:
             i.print_info()
     def get_file_data(self, filename):
         fileitem = None
         if type(filename) == str:
-            for i in self.file_metas:
+            for i in self.file_items:
                 if i.filename == filename:
                     fileitem = i
             if fileitem == None:
                 print("File [%s] not found"%filename)
                 return None
-        elif type(filename) == pak_file_5_meta:
-            if filename in self.file_metas:
+        elif type(filename) == file_item:
+            if filename in self.file_items:
                 fileitem = filename
             else:
                 print("File [%s] not found"%filename.filename)
@@ -250,40 +279,31 @@ class pak_file:
 
 import os
 
-if __name__ == "__main__":
-    if len(sys.argv) == 1:
-        filename = "../../Scr06.pak"
-    else:
-        filename = sys.argv[1]
-    unpack_file = None
-    if len(sys.argv) == 3:
-        unpack_file = sys.argv[2]
-    pak = pak_file(filename)
+def unpack(pak_file_name, file_to_unpack = None, save_to_file:bool = True):
+    pak = pak_file(pak_file_name)
     pak.print_info()
 
-    pak_name = os.path.basename(filename).split('.')[0]
+    pak_name = os.path.basename(pak_file_name).split('.')[0]
     if not os.path.isdir(pak_name):
         os.mkdir(pak_name)
-    for i in pak.file_metas:
-        save_to_file_status = True
-        do_save_to_file = True
-        if unpack_file != None and i.filename != unpack_file:
+    for i in pak.file_items:
+        if file_to_unpack != None and i.filename != file_to_unpack:
             continue
         if i.type == "IMG": # image item
             img = image_file(i.filename,pak.get_file_data(i))
-            if do_save_to_file:
+            if save_to_file:
                 save_to_file_status = img.save_to_dir(pak_name + '/')
         elif i.type == "SCW":   # script item
             scw = scw_file(i.filename, pak.get_file_data(i))
-            if do_save_to_file:
+            if save_to_file:
                 save_to_file_status = scw.save_to_dir(pak_name + '/')
         else:
-            if do_save_to_file:
+            if save_to_file:
                 f = open(pak_name + '/' + i.filename,'wb')
                 f.write(pak.get_file_data(i))
                 f.close()
                 save_to_file_status = True
-        if not do_save_to_file:
+        if not save_to_file:
             print("[skip]"+'\t',end='')
         else:
             if save_to_file_status:
@@ -291,3 +311,26 @@ if __name__ == "__main__":
             else:
                 print("[fail]"+'\t',end='')
         i.print_info()
+
+if __name__ == "__main__":
+    save_to_file = True
+    filename = '../../SCR.PAK'
+    unpack_file = None
+
+    if len(sys.argv) > 1:
+        filename = sys.argv[1]
+    if len(sys.argv) > 2:
+        arg = sys.argv[2]
+        if sys.argv[2].lower() == 'true':
+            save_to_file = True
+        elif sys.argv[2].lower() == 'false':
+            save_to_file = False
+        else:
+            unpack_file = arg
+    if len(sys.argv) > 3:
+        if sys.argv[3].lower() == 'true':
+            save_to_file = True
+        elif sys.argv[3].lower() == 'false':
+            save_to_file = False
+    unpack(filename, unpack_file, save_to_file)
+    
