@@ -109,6 +109,8 @@ class pak_file_5_header:
         print("      Raw Offset : " + str(hex(self.raw_offset)))
         print("     Footer Size : " + str(hex(self.footer_size)))
         print("   Footer Offset : " + str(hex(self.footer_offset)))
+    def repack_to_data(self):
+        return struct.pack('16s32sIIIIII',self.magic.encode(repack_codec), self.release.encode(repack_codec), self.version, self.footer_size, self.flag, self.file_num, self.raw_offset, self.footer_offset)
 
 class scw_file:
     type_code = 0x35776353
@@ -116,15 +118,13 @@ class scw_file:
     meta_size = 0x1C8
     def __init__(self, filename, data):
         self.filename = filename
-        self.data = data
         self.header = data[0:self.meta_size]
-        self.raw_data = None
+        self.raw_data = data[self.meta_size:]
                                                                         #
         (self.magic, self.major_v, self.flag, self.unpacked_size, self.raw_size, self.minor_v, self.show_num, self.text_num, self.unk_num, self.show_block_size, self.text_block_size, self.unk_block) = struct.unpack('16sIIIIIIIIII400s',data[0:self.meta_size])
         
-        self.header = self.data[0:self.meta_size]
         reader = op_reader()
-        self.unpacked_data = reader.unpack(self.xor(self.data[self.meta_size:]))
+        self.unpacked_data = reader.unpack(self.xor(self.raw_data))
     def xor(self, data):
         out_buf = bytearray()
         for i in range(len(data)):
@@ -133,13 +133,8 @@ class scw_file:
             out_buf.append(byte_selected)
         return out_buf
     def repack_to_data(self,directory):
-        if not os.path.isfile(directory + self.filename + '.scw5'):
-            print("No such file [" + self.filename + ']')
-            return None
         if not os.path.isfile(directory + self.filename + '.txt'):  # only raw data, do not need repack
-            with open(directory + self.filename + '.scw5','rb') as fp:
-                return fp.read()
-            return None
+            return self.header + self.raw_data
         byte_text = bytearray()
         byte_text_table = bytearray()
         text_num = 0
@@ -149,88 +144,71 @@ class scw_file:
             while True:
                 c_line = fp.readline()
                 if c_line == '' or c_line == '\n':
+                    if len(text) == 0 and c_line == '\n':
+                        continue
                     if len(text) == 1:  # 只有单行，应该是控制演出的
                         pass
                     elif len(text) == 2:    # 两行，意味着没有翻译
                         pass
-                    elif len(text) == 3:    # 三行，意味着翻译了
-                        del text[1] # 删除第二行，因为第二行是原文 
                     elif c_line == '':
                         break
-                    tmp_bytes = "".join(text).rstrip('\n').encode(repack_codec) # 删除最后一个'\n'
+                    tmp_bytes = ("".join(text)).rstrip('\n').encode(repack_codec) # 删除最后一个'\n'
                     byte_text += tmp_bytes
                     byte_text.append(0x00)  # 再在尾部添加一个'\0'
                     byte_text_table += int.to_bytes(text_ptr,length=4,byteorder='little',signed=False)
                     byte_text_table += int.to_bytes(len(tmp_bytes)+1,length=4,byteorder='little',signed=False)
                     text_ptr += len(tmp_bytes) + 1
                     text_num += 1
-                    print(str(text_num) + "\t",end="")
-                    print("".join(text).rstrip('\n'))
                     if c_line == '':
                         break
                     text = []   # clear text
                     continue
                 text.append(c_line)
                 # continue
+            if len(byte_text) > self.text_block_size:
+                print("Warning new text block is bigger than old one!")
         
         new_unpacked_data = bytearray()
         new_unpacked_data += self.unpacked_data[0:self.show_num*8]  # show table
-        #print_memory(self.unpacked_data[0:self.show_num*8])
         offset = self.show_num * 8
         new_unpacked_data += byte_text_table    # text table
-        #print('\n')
-        #print_memory(byte_text_table)
         offset += self.text_num * 8
-        #print(self.text_num)
-        #print(text_num)
         new_unpacked_data += self.unpacked_data[offset:offset+self.unk_num*8]   # unk_table
-        #print('\n')
-        #print_memory(self.unpacked_data[offset:offset+self.unk_num*8])
         offset += self.unk_num * 8
         new_unpacked_data += self.unpacked_data[offset:offset+self.show_block_size]    # show data
         offset += self.show_block_size
         new_unpacked_data += byte_text
         if len(byte_text) < self.text_block_size:
+            print("Warning new text block is smaller than old one!")
             for _ in range(self.text_block_size - len(byte_text)):
                 new_unpacked_data.append(0x00)
         elif len(byte_text) > self.text_block_size:
             print("Warning new text block is bigger than old one!")
         offset += self.text_block_size
         new_unpacked_data += self.unpacked_data[offset:]
-        f = open(directory + self.filename + '.repacked','wb')
-        f.write(new_unpacked_data)
-        f.close()
         reader = op_reader()
-        new_packed_data = reader.pack(self.xor(new_unpacked_data))
-        self.raw_size = len(new_packed_data)
+        new_raw_data = self.xor(reader.pack(new_unpacked_data))
+        self.raw_size = len(new_raw_data)
 
-        new_header = struct.pack('16sIIIIIIIIII400s',self.magic, self.major_v, self.flag, len(new_unpacked_data), len(new_packed_data), self.minor_v, self.show_num, self.text_num, self.unk_num, self.show_block_size, len(byte_text), self.unk_block)
-        return new_header + new_packed_data
-        
-        
+        new_header = struct.pack('16sIIIIIIIIII400s',self.magic, self.major_v, self.flag, len(new_unpacked_data), len(new_raw_data), self.minor_v, self.show_num, self.text_num, self.unk_num, self.show_block_size, len(byte_text), self.unk_block)
+        return new_header + new_raw_data   
     def unpack_to_dir(self,directory):
         if self.flag == 0xFFFFFFFF and self.major_v == 0x5000000 and self.magic.decode(unpack_codec).rstrip('\0') == 'Scw5.x' and self.minor_v == 0x1:
             reader = op_reader()
-            unpacked_data = reader.unpack(self.xor(self.raw_data))
+            self.unpacked_data = reader.unpack(self.xor(self.raw_data))
 
-            if len(unpacked_data) != self.unpacked_size:
-                print("Warning : [" + filename + '] unpacked size should be ' + str(hex(self.unpacked_size)) + " but " + str(hex(len(self.data)) + " unpacked!"))
-                unpacked_data = None
+            if len(self.unpacked_data) != self.unpacked_size:
+                print("Warning : [" + filename + '] unpacked size should be ' + str(hex(self.unpacked_size)) + " but " + str(hex(len(self.unpacked_data)) + " unpacked!"))
+                self.unpacked_data = None
                 return False
         else:
             print("Warning : [" + filename + '] is not supported SCW file')
             return False
-        f = open(directory + self.filename + '.scw5','wb')
-        f.write(self.data)
-        f.close()
-        f = open(directory + self.filename + '.unpacked','wb')
-        f.write(unpacked_data)
-        f.close()
         if self.text_num and self.text_block_size:
             offset = self.show_num*8
-            text_index_table = unpacked_data[offset:offset+self.text_num*8]
+            text_index_table = self.unpacked_data[offset:offset+self.text_num*8]
             offset += (self.text_num + self.unk_num) * 8 + self.show_block_size
-            text_block_data = unpacked_data[offset:offset+self.text_block_size]
+            text_block_data = self.unpacked_data[offset:offset+self.text_block_size]
             text = []
             for i in range(self.text_num):
                 (start, length) = struct.unpack('II',text_index_table[i*8:(i+1)*8])
@@ -305,7 +283,7 @@ class image_file:
         c_img.save(directory + self.filename + '.png')
         return 1
         
-# common file meta contained in DataPack5
+# common file meta contained in DataPack5(in footer)
 class file_item:
     meta_size = 0x68
     def __init__(self, data,f_type = None):
@@ -328,6 +306,10 @@ class file_item:
             'type = '+ str(self.type),
             'offset = 0x%08X'%self.offset
         ))
+    def repack_to_data(self,raw_data_len, offset):
+        filename = (self.filename + '\0').encode(repack_codec)
+        file_size = raw_data_len
+        return struct.pack('64sII32s',filename, offset, file_size, self.unk32s)
 
 class pak_file_4_meta:
     meta_size = 0x48
@@ -342,7 +324,7 @@ class pak_file:
         # read header
         self.header = pak_file_5_header(self.fp.read(pak_file_5_header.header_size))
 
-        # read file metas(meta version 5)
+        # read file metas(meta version 5)   in footer
         self.fp.seek(self.header.footer_offset,0)
         meta_buf = self.reader.unpack(self.fp.read(self.header.footer_size))
         self.file_items = []
@@ -351,6 +333,15 @@ class pak_file:
             self.fp.seek(self.header.raw_offset + item.offset)
             item.set_type(int.from_bytes(self.fp.read(4),byteorder='little'))
             self.file_items.append(item)
+    def repack_to_data(self,raw_data,footer):
+        reader = op_reader()
+        packed_raw_data = raw_data
+        packed_footer = reader.pack(footer)
+        self.header.footer_offset = self.header.raw_offset + len(packed_raw_data)
+        self.header.footer_size = len(packed_footer)
+        new_header = self.header.repack_to_data()
+        self.fp.seek(self.header.header_size,0)
+        return new_header + self.fp.read(self.header.raw_offset - self.header.header_size) + packed_raw_data + packed_footer
     def print_info(self):
         print("----------PAK FILE HEADER----------")
         self.header.print_info()
@@ -416,22 +407,34 @@ def unpack(pak_file_name, file_to_unpack = None, save_to_file:bool = True):
                 print("[fail]"+'\t',end='')
         i.print_info()
 
-def pack_scw(directory):
-    for filename in os.listdir(directory):
-        if filename.split('.')[1] != 'scw5':
-            continue
-        filename = filename.split('.')[0]
-        if filename != 'CEV001_102':
-            continue
-        scw = scw_file(filename, open(directory + filename + '.scw5','rb').read())
-        print("WRITE " + filename + '.repacked')
-        scw.repack_to_data(directory)
-        
-
+def repack(directory, basefile):
+    pak = pak_file(basefile)    # 从原有的pak文件中读入文件信息
+    raw_ptr = 0                 # raw 指针，用于记录偏移量
+    raw_data = bytearray()
+    footer = bytearray()
+    for i in pak.file_items:
+        filename = i.filename
+        if i.type == 'SCW':
+            print('Repacking ' + i.filename)
+            scw = scw_file(i.filename,pak.get_file_data(i))
+            new_raw_data = scw.repack_to_data(directory)
+            new_footer_item = i.repack_to_data(len(new_raw_data),raw_ptr)
+            raw_ptr += len(new_raw_data)
+            raw_data += new_raw_data
+            footer += new_footer_item
+        elif os.path.isfile(directory + filename + '.png'):
+            pass
+    # gen DataPack5 file header
+    return pak.repack_to_data(raw_data,footer)
 
 if __name__ == "__main__":
-    pack_scw('SCR/')
+    fp = open('SCR06.PAK','wb')
+    fp.write(repack('SCR06/','../../Scr06.pak'))
+    fp.close()
     exit(0)
+    #repack('SCR/','../../SCR.PAK_back')
+    #exit(0)
+    
     save_to_file = True
     filename = '../../SCR.PAK'
     unpack_file = None
