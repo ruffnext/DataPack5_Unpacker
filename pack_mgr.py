@@ -3,8 +3,8 @@ import sys
 from PIL import Image
 import numpy as np
 
-unpack_codec = 'Shift_JIS'
-repack_codec = 'Shift_JIS'
+unpack_codec = 'shift_jisx0213'
+repack_codec = 'gb2312'
 
 def print_memory(memory):
     j = 0
@@ -138,26 +138,37 @@ class scw_file:
         byte_text = bytearray()
         byte_text_table = bytearray()
         text_num = 0
-        with open(directory + self.filename + '.txt',encoding='utf-8') as fp:   # 从txt文件中读入文本，并处理
+        with open(r"%s%s.txt"%(directory , self.filename),encoding='utf-8') as fp:   # 从txt文件中读入文本，并处理
             text_ptr = 0
             text = []
             while True:
                 c_line = fp.readline()
                 if c_line == '' or c_line == '\n':
-                    if len(text) == 0 and c_line == '\n':
+                    if len(text) == 0 and c_line == '\n':   # 应对三个换行的
+                        text.append(c_line)
                         continue
-                    if len(text) == 1:  # 只有单行，应该是控制演出的
-                        pass
-                    elif len(text) == 2:    # 两行，意味着没有翻译
-                        pass
+                    elif len(text) == 2 and text[0] == '[FAILED TO DECODE]\n':
+                        tmp_bytes = eval(text[1])
+                        byte_text += tmp_bytes
+                        byte_text_table += int.to_bytes(text_ptr,length=4,byteorder='little',signed=False)
+                        byte_text_table += int.to_bytes(len(tmp_bytes),length=4,byteorder='little',signed=False)
+                        text_ptr += len(tmp_bytes)
                     elif c_line == '':
                         break
-                    tmp_bytes = ("".join(text)).rstrip('\n').encode(repack_codec) # 删除最后一个'\n'
-                    byte_text += tmp_bytes
-                    byte_text.append(0x00)  # 再在尾部添加一个'\0'
-                    byte_text_table += int.to_bytes(text_ptr,length=4,byteorder='little',signed=False)
-                    byte_text_table += int.to_bytes(len(tmp_bytes)+1,length=4,byteorder='little',signed=False)
-                    text_ptr += len(tmp_bytes) + 1
+                    else:
+                        try:
+                            tmp_bytes = ("".join(text)).rstrip('\n').encode(repack_codec) # 删除最后一个'\n'
+                        except Exception:
+                            try:
+                                tmp_bytes = ("".join(text)).rstrip('\n').encode(unpack_codec) # 删除最后一个'\n'
+                            except Exception:
+                                print("".join(text))
+                                exit(0)
+                        byte_text += tmp_bytes
+                        byte_text.append(0x00)  # 再在尾部添加一个'\0'
+                        byte_text_table += int.to_bytes(text_ptr,length=4,byteorder='little',signed=False)
+                        byte_text_table += int.to_bytes(len(tmp_bytes)+1,length=4,byteorder='little',signed=False)
+                        text_ptr += len(tmp_bytes) + 1
                     text_num += 1
                     if c_line == '':
                         break
@@ -165,8 +176,6 @@ class scw_file:
                     continue
                 text.append(c_line)
                 # continue
-            if len(byte_text) > self.text_block_size:
-                print("Warning new text block is bigger than old one!")
         
         new_unpacked_data = bytearray()
         new_unpacked_data += self.unpacked_data[0:self.show_num*8]  # show table
@@ -178,14 +187,16 @@ class scw_file:
         new_unpacked_data += self.unpacked_data[offset:offset+self.show_block_size]    # show data
         offset += self.show_block_size
         new_unpacked_data += byte_text
-        if len(byte_text) < self.text_block_size:
-            print("Warning new text block is smaller than old one!")
-            for _ in range(self.text_block_size - len(byte_text)):
-                new_unpacked_data.append(0x00)
-        elif len(byte_text) > self.text_block_size:
-            print("Warning new text block is bigger than old one!")
         offset += self.text_block_size
         new_unpacked_data += self.unpacked_data[offset:]
+
+        if len(byte_text) < self.text_block_size:
+            print("Warning new text block is smaller than old one!")
+            #for _ in range(self.text_block_size - len(byte_text)):
+            #    new_unpacked_data.append(0x00)
+        elif len(byte_text) > self.text_block_size:
+            print("Warning new text block is bigger than old one!")
+
         reader = op_reader()
         new_raw_data = self.xor(reader.pack(new_unpacked_data))
         self.raw_size = len(new_raw_data)
@@ -201,6 +212,10 @@ class scw_file:
                 print("Warning : [" + filename + '] unpacked size should be ' + str(hex(self.unpacked_size)) + " but " + str(hex(len(self.unpacked_data)) + " unpacked!"))
                 self.unpacked_data = None
                 return False
+            fp = open(directory + self.filename + '.unpacked','wb')
+            fp.write(self.unpacked_data)
+            fp.close()
+
         else:
             print("Warning : [" + filename + '] is not supported SCW file')
             return False
@@ -215,6 +230,7 @@ class scw_file:
                 try:
                     text.append(text_block_data[start:start+length].decode(unpack_codec).replace('\0','\n\n'))
                 except Exception:
+                    print("FAILED TO DECODE")
                     text.append("[FAILED TO DECODE]\n")
                     text.append(str(text_block_data[start:start+length]) + "\n\n")
             txt_file = open(directory + self.filename + '.txt','w',encoding='utf-8')
@@ -413,7 +429,6 @@ def repack(directory, basefile):
     raw_data = bytearray()
     footer = bytearray()
     for i in pak.file_items:
-        filename = i.filename
         if i.type == 'SCW':
             print('Repacking ' + i.filename)
             scw = scw_file(i.filename,pak.get_file_data(i))
@@ -422,18 +437,17 @@ def repack(directory, basefile):
             raw_ptr += len(new_raw_data)
             raw_data += new_raw_data
             footer += new_footer_item
-        elif os.path.isfile(directory + filename + '.png'):
+        elif os.path.isfile(directory + i.filename + '.png'):
             pass
     # gen DataPack5 file header
     return pak.repack_to_data(raw_data,footer)
 
 if __name__ == "__main__":
     fp = open('SCR06.PAK','wb')
-    fp.write(repack('SCR06/','../../Scr06.pak'))
+    fp.write(repack('SCR06/','../../Scr06.pak_back'))
     fp.close()
+    #repack('SCR06/','../../SCR06.PAK_back')
     exit(0)
-    #repack('SCR/','../../SCR.PAK_back')
-    #exit(0)
     
     save_to_file = True
     filename = '../../SCR.PAK'
