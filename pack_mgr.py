@@ -4,7 +4,7 @@ from PIL import Image
 import numpy as np
 
 unpack_codec = 'shift_jisx0213'
-repack_codec = 'gb2312'
+repack_codec = 'gbk'
 
 def print_memory(memory):
     j = 0
@@ -24,7 +24,7 @@ def print_memory(memory):
 class op_reader:
     def __init__(self):
         self.buf = bytearray([0 for _ in range(0x1000)])
-        self.ptr = 0xFEE
+        self.ptr = 0xFE
     def unpack(self, in_buf):
         in_size = len(in_buf)
         opcode = 0x0000
@@ -196,7 +196,6 @@ class scw_file:
             #    new_unpacked_data.append(0x00)
         elif len(byte_text) > self.text_block_size:
             print("Warning new text block is bigger than old one!")
-
         reader = op_reader()
         new_raw_data = self.xor(reader.pack(new_unpacked_data))
         self.raw_size = len(new_raw_data)
@@ -443,30 +442,39 @@ def repack(directory, basefile):
     return pak.repack_to_data(raw_data,footer)
 
 if __name__ == "__main__":
-    fp = open('SCR06.PAK','wb')
-    fp.write(repack('SCR06/','../../Scr06.pak_back'))
-    fp.close()
-    #repack('SCR06/','../../SCR06.PAK_back')
-    exit(0)
-    
     save_to_file = True
     filename = '../../SCR.PAK'
     unpack_file = None
 
-    if len(sys.argv) > 1:
-        filename = sys.argv[1]
-    if len(sys.argv) > 2:
-        arg = sys.argv[2]
-        if sys.argv[2].lower() == 'true':
-            save_to_file = True
-        elif sys.argv[2].lower() == 'false':
-            save_to_file = False
-        else:
-            unpack_file = arg
-    if len(sys.argv) > 3:
-        if sys.argv[3].lower() == 'true':
-            save_to_file = True
-        elif sys.argv[3].lower() == 'false':
-            save_to_file = False
-    unpack(filename, unpack_file, save_to_file)
+    if len(sys.argv) < 2:
+        print("Useage:\t" + sys.argv[0] + " unpack [FILENAME] <True/False>")
+        print("\t" + sys.argv[0] + " repack [DIRECTORY] [BASE FILE].pak [TO FILE].pak")
+        exit(0)
+    if sys.argv[1].lower() == 'unpack':
+        if len(sys.argv) > 2:
+            filename = sys.argv[2]
+        if len(sys.argv) > 3:
+            arg = sys.argv[3]
+            if sys.argv[3].lower() == 'true':
+                save_to_file = True
+            elif sys.argv[3].lower() == 'false':
+                save_to_file = False
+            else:
+                unpack_file = arg
+        if len(sys.argv) > 3:
+            if sys.argv[3].lower() == 'true':
+                save_to_file = True
+            elif sys.argv[3].lower() == 'false':
+                save_to_file = False
+        unpack(filename, unpack_file, save_to_file)
+        exit(0)
+    else:
+        directory = sys.argv[2]
+        basefile = sys.argv[3]
+        tofile = sys.argv[4]
+        fp = open('tofile','wb')
+        fp.write(repack(directory,basefile))
+        fp.close()
+        exit(0)
+
     
