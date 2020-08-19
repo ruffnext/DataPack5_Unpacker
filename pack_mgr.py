@@ -243,49 +243,79 @@ class image_file:
     meta_size = 0x74
     def __init__(self, filename, data):
         self.filename = filename
-        self.data = None
+        self.unpacked_data = None
+        self.raw_data = None
+        self.header = data[0:self.meta_size]
         self.byte_num = 0
-        (filetype, raw_size, unpacked_size, _, _, self.resolution_x, self.resolution_y, img_type, self.use_alpha,_,_) = struct.unpack('IIIIIIIIII76s',data[0:self.meta_size])
-        if filetype != self.type_code:
-            print("Warning : [" + filename + "] type [" + str(hex(filetype)) + "] is not a valid image file")
+        (self.filetype, self.raw_size, self.unpacked_size, self.unk1, self.unk2, self.resolution_x, self.resolution_y, self.img_type, self.use_alpha,self.unk3,self.unk4) = struct.unpack('IIIIIIIIII76s',self.header)
+        if self.filetype != self.type_code:
+            print("Warning : [" + filename + "] type [" + str(hex(self.filetype)) + "] is not a valid image file")
             return
-        if img_type == 8:
+        if self.img_type == 8:
             self.byte_num = 1
-        elif img_type == 0x18:
+        elif self.img_type == 0x18:
             self.byte_num = 3
-        elif img_type == 0x20:
+        elif self.img_type == 0x20:
             self.byte_num = 4
         else:
             print("Warning : [" + filename + "] is not a valid image file")
             return
+        self.raw_data = data[self.meta_size:self.meta_size+self.raw_size]
         reader = op_reader()
-        self.data = reader.unpack(data[self.meta_size:])
-        if len(self.data) != unpacked_size:
-            print("Warning : [" + filename + '] unpacked size should be ' + str(hex(unpacked_size)) + " but " + str(hex(len(self.data)) + " unpacked!"))
+        self.unpacked_data = reader.unpack(self.raw_data)
+        if len(self.unpacked_data) != self.unpacked_size:
+            print("Warning : [" + filename + '] unpacked size should be ' + str(hex(self.unpacked_size)) + " but " + str(hex(len(self.unpacked_data)) + " unpacked!"))
             self.data = None
-    
+    def repack_to_data(self, directory):
+        if not os.path.isfile(directory + self.filename + '.png'):
+            return self.header + self.raw_data
+        img = Image.open(directory + self.filename + '.png')
+        if img.size != (self.resolution_x,self.resolution_y):
+            print("Resolution is not match")
+            return self.header + self.raw_data
+        if img.mode != 'RGBA':
+            print("Image mode is not match")
+            return self.header + self.raw_data
+        if self.byte_num == 1:
+            print("1 byte len img is not supported!")
+            return self.header + self.raw_data
+        new_unpacked_data = bytearray()
+        for y in range(self.resolution_y):
+            for x in range(self.resolution_x):
+                (r,g,b,a) = img.getpixel((x,y))
+                if self.byte_num == 3:
+                    new_unpacked_data += bytearray(b,g,r)
+                elif self.byte_num ==4:
+                    new_unpacked_data += bytearray(b,g,r,a)
+                else:
+                    return self.header + self.raw_data
+        new_raw_data = op_reader().pack(new_unpacked_data)
+        new_header = struct.pack('IIIIIIIIII76s',(self.filetype, len(new_raw_data), self.unpacked_size, self.unk1, self.unk2, self.resolution_x, self.resolution_y, self.img_type, self.use_alpha,self.unk3,self.unk4))
+        return new_header + new_raw_data
+                
+
     # ignore alpha channel
     # directory must be ended with / or \\
     # return 1 means success
     def unpack_to_dir(self, directory):
-        if self.data == None:
+        if self.unpacked_data == None:
             return 0
         if self.byte_num == 1:
             print(str(self.resolution_x) + "x" + str(self.resolution_y))
             f = open(directory + self.filename,'wb')
-            f.write(self.data)
+            f.write(self.unpacked_data)
             f.close()
             return 1
         img = [[None for x in range(self.resolution_x)] for y in range(self.resolution_y)]
         for y in range(self.resolution_y):
             for x in range(self.resolution_x):
                 index = (y*self.resolution_x + x)*self.byte_num
-                b = np.uint8(self.data[index])
-                g = np.uint8(self.data[index+1])
-                r = np.uint8(self.data[index+2])
+                b = np.uint8(self.unpacked_data[index])
+                g = np.uint8(self.unpacked_data[index+1])
+                r = np.uint8(self.unpacked_data[index+2])
                 if self.byte_num == 4 and self.use_alpha == 0xf:
                     # use alpha channel
-                    a = np.uint8(self.data[index+3])
+                    a = np.uint8(self.unpacked_data[index+3])
                     img[y][x] = [r,g,b,a]
                 elif self.byte_num == 4 or self.use_alpha != 0xf:
                     # skip alpha channel
@@ -437,7 +467,8 @@ def repack(directory, basefile):
             raw_data += new_raw_data
             footer += new_footer_item
         elif os.path.isfile(directory + i.filename + '.png'):
-            pass
+            img = image_file(i.filename, pak.get_file_data(i))
+
     # gen DataPack5 file header
     return pak.repack_to_data(raw_data,footer)
 
